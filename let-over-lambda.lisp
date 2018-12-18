@@ -25,79 +25,10 @@
 
 ;; Modifications by "the Phoeron" Colin J.E. Lupton, 2012--2014
 ;; - Support for ASDF/Quicklisp
-;; - Cheap hacks to support new Backquote implementation in SBCL v1.2.2
 
-;; Safety feature for SBCL>=v1.2.2
-#+sbcl
-(eval-when (:compile-toplevel :execute)
-  (handler-case
-      (progn
-        (sb-ext:assert-version->= 1 2 2)
-        (setq *features* (remove 'old-sbcl *features*)))
-    (error ()
-      (pushnew 'old-sbcl *features*))))
-
-(defun group (source n)
-  (if (zerop n) (error "zero length"))
-  (labels ((rec (source acc)
-             (let ((rest (nthcdr n source)))
-               (if (consp rest)
-                   (rec rest (cons
-                               (subseq source 0 n)
-                               acc))
-                   (nreverse
-                     (cons source acc))))))
-    (if source (rec source nil) nil)))
-
-#-sbcl
-(defmacro defmacro/g! (name args &rest body)
-  (let ((syms (remove-duplicates
-               (remove-if-not #'g!-symbol-p
-                              (flatten body)))))
-    (multiple-value-bind (body declarations docstring)
-        (parse-body body :documentation t)
-      `(defmacro ,name ,args
-         ,@(when docstring
-             (list docstring))
-         ,@declarations
-         (let ,(mapcar
-                (lambda (s)
-                  `(,s (gensym ,(subseq
-                                 (symbol-name s)
-                                 2))))
-                syms)
-           ,@body)))))
-#-sbcl
-(defmacro defmacro! (name args &rest body)
-  (let* ((os (remove-if-not #'o!-symbol-p (flatten args)))
-         (gs (mapcar #'o!-symbol-to-g!-symbol os)))
-    (multiple-value-bind (body declarations docstring)
-        (parse-body body :documentation t)
-      `(defmacro/g! ,name ,args
-         ,@(when docstring
-	     (list docstring))
-         ,@declarations
-         `(let ,(mapcar #'list (list ,@gs) (list ,@os))
-            ,(progn ,@body))))))
-;; See SBCL defmacro! in automatic-gensyms.lisp
-
-#-sbcl(defmacro defun! (name args &body body)
-  (let ((syms (remove-duplicates
-               (remove-if-not #'g!-symbol-p
-                              (flatten body)))))
-    (multiple-value-bind (body declarations docstring)
-        (parse-body body :documentation t)
-      `(defun ,name ,args
-         ,@(when docstring
-             (list docstring))
-         ,@declarations
-         (let ,(mapcar (lambda (s)
-                         `(,s (gensym ,(subseq (symbol-name s)
-                                               2))))
-                       syms)
-           ,@body)))))
-
-;; Nestable suggestion from Daniel Herring
+;; Modifications by "equwal" Spenser Truex, 2018 (http://truex.eu)
+;; - Reader macros for defmacro/g! and defmacro! since SBCL won't allow
+;;   otherwise.
 (eval-when (:compile-toplevel :load-toplevel :execute)
  (defun |#"-reader| (stream sub-char numarg)
    (declare (ignore sub-char numarg))
@@ -175,25 +106,9 @@
         (push curr chars))
       (cons (coerce (nreverse chars) 'string)
             (segment-reader stream ch (- n 1))))))
-
-#+(and cl-ppcre (not sbcl))
-(defmacro! match-mode-ppcre-lambda-form (o!args o!mods)
- ``(lambda (,',g!str)
-     (ppcre:scan-to-strings
-       ,(if (zerop (length ,g!mods))
-          (car ,g!args)
-          (format nil "(?~a)~a" ,g!mods (car ,g!args)))
-       ,',g!str)))
-#+(and cl-ppcre sbcl)
+#+cl-ppcre
 (defun format-kludge-match-mode-ppcre-lambda-form ()
   "(?~a)~a")
-#+(and cl-ppcre (not sbcl))
-(defmacro! subst-mode-ppcre-lambda-form (o!args)
- ``(lambda (,',g!str)
-     (cl-ppcre:regex-replace-all
-       ,(car ,g!args)
-       ,',g!str
-       ,(cadr ,g!args))))
 #+cl-ppcre
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun |#~-reader| (stream sub-char numarg)
@@ -216,20 +131,6 @@
                           (read-char stream)
                           2)))
         (t (error "Unknown #~~ mode character"))))))
-#-sbcl
-(defmacro! dlambda (&rest ds)
-  `(lambda (&rest ,g!args)
-     (case (car ,g!args)
-       ,@(mapcar
-           (lambda (d)
-             `(,(if (eq t (car d))
-                  t
-                  (list (car d)))
-               (apply (lambda ,@(cdr d))
-                      ,(if (eq t (car d))
-                         g!args
-                         `(cdr ,g!args)))))
-           ds))))
 ;; Graham's alambda
 (defmacro alambda (parms &body body)
   `(labels ((self ,parms ,@body))
@@ -260,96 +161,65 @@
     (:merge :standard)
     (:dispatch-macro-char #\# #\" #'|#"-reader|)
     (:dispatch-macro-char #\# #\> #'|#>-reader|)
-    #+(and cl-ppcre (not sbcl))
+    #+cl-ppcre
     (:dispatch-macro-char #\# #\~ #'|#~-reader|)
     (:dispatch-macro-char #\# #\` #'|#`-reader|)
     (:dispatch-macro-char #\# #\f #'|#f-reader|)
-    #+sbcl
-    (:dispatch-macro-char
-     #\# #\g
-     #'(lambda (stream char numarg)
-	 (declare (ignore char numarg))
-	 (make-autogensym-reader 'defmacro stream)))
-    #+sbcl
-    (:dispatch-macro-char #\# #\n #'(lambda (stream char numarg)
-				      (declare (ignore char numarg))
-				      (make-autogensym-reader 'defun stream)))
-    #+sbcl
-    (:dispatch-macro-char #\# #\d #'defmacro!-reader)))
+    (:dispatch-macro-char #\# #\g #'|#g-reader|))
+    (:dispatch-macro-char #\# #\n #'|#n-reader|)
+    (:dispatch-macro-char #\# #\d #'|#d-reader|))
 (in-readtable lol-syntax)
-#+(and cl-ppcre sbcl)
-(progn
-  #d{match-mode-ppcre-lambda-form (o!args o!mods)
-  ``(lambda (,',g!str)
-      (ppcre:scan-to-strings
-       ,(if (zerop (length ,g!mods))
-	    (car ,g!args)
-	    (format nil (format-kludge-match-mode-ppcre-lambda-form) ,g!mods (car ,g!args)))
-       ,',g!str))})
-#+(and cl-ppcre sbcl)
+#+cl-ppcre
+#d{match-mode-ppcre-lambda-form (o!args o!mods)
+``(lambda (,',g!str)
+    (ppcre:scan-to-strings
+     ,(if (zerop (length ,g!mods))
+          (car ,g!args)
+          (format nil (format-kludge-match-mode-ppcre-lambda-form) ,g!mods (car ,g!args)))
+     ,',g!str))}
+#+cl-ppcre
 (defun format-aux (mods carargs)
   (format nil "(?~a)~a" mods carargs))
 #+(and cl-ppcre sbcl)
-(progn #d{match-mode-ppcre-lambda-form (o!args o!mods)
-           ``(lambda (,',g!str)
-	       (ppcre:scan-to-strings
-		,(if (zerop (length ,g!mods))
-		     (car ,g!args)
-		     (format-aux ,g!mods (car ,g!args)))
-		,',g!str))})
-#+sbcl
-(progn #d{dlambda (&rest ds)
-           `(lambda (&rest ,g!args)
-	      (case (car ,g!args)
-		,@(mapcar
-		   (lambda (d)
-		     `(,(if (eq t (car d))
-			    t
-			    (list (car d)))
-			(apply (lambda ,@(cdr d))
-			       ,(if (eq t (car d))
-				    g!args
-				    `(cdr ,g!args)))))
-		   ds)))})
-
-#-sbcl
-(defmacro! nlet-tail (n letargs &body body)
-  (let ((gs (loop for i in letargs
-               collect (gensym))))
-    `(macrolet
-         ((,n ,gs
-            `(progn
-               (psetq
-                ,@(apply #'nconc
-                         (mapcar
-                          #'list
-                          ',(mapcar #'car letargs)
-                          (list ,@gs))))
-               (go ,',g!n))))
-       (block ,g!b
-         (let ,letargs
-           (tagbody
-              ,g!n (return-from
-                    ,g!b (progn ,@body))))))))
-#+sbcl
-(progn #d{nlet-tail (n letargs &body body)
-           (let ((gs (loop for i in letargs
-			collect (gensym))))
-	     `(macrolet
-		  ((,n ,gs
-		     `(progn
-			(psetq
-			 ,@(apply #'nconc
-				  (mapcar
-				   #'list
-				   ',(mapcar #'car letargs)
-				   (list ,@gs))))
-			(go ,',g!n))))
-		(block ,g!b
-		  (let ,letargs
-		    (tagbody
-		       ,g!n (return-from
-			     ,g!b (progn ,@body)))))))})
+#d{match-mode-ppcre-lambda-form (o!args o!mods)
+``(lambda (,',g!str)
+    (ppcre:scan-to-strings
+     ,(if (zerop (length ,g!mods))
+          (car ,g!args)
+          (format-aux ,g!mods (car ,g!args)))
+     ,',g!str))}
+#+cl-ppcre
+#d{dlambda (&rest ds)
+`(lambda (&rest ,g!args)
+   (case (car ,g!args)
+     ,@(mapcar
+        (lambda (d)
+          `(,(if (eq t (car d))
+                 t
+                 (list (car d)))
+            (apply (lambda ,@(cdr d))
+                   ,(if (eq t (car d))
+                        g!args
+                        `(cdr ,g!args)))))
+        ds)))}
+#d{nlet-tail (n letargs &body body)
+(let ((gs (loop for i in letargs
+                collect (gensym))))
+  `(macrolet
+       ((,n ,gs
+          `(progn
+             (psetq
+              ,@(apply #'nconc
+                       (mapcar
+                        #'list
+                        ',(mapcar #'car letargs)
+                        (list ,@gs))))
+             (go ,',g!n))))
+     (block ,g!b
+       (let ,letargs
+         (tagbody
+            ,g!n (return-from
+                  ,g!b (progn ,@body)))))))}
 
 (defmacro alet% (letargs &rest body)
   `(let ((this) ,@letargs)
@@ -538,29 +408,16 @@
       (setf p (ash p -1)))
     (nreverse network)))
 
-#-sbcl
-(defmacro! sortf (comparator &rest places)
-  (if places
+#d{sortf (comparator &rest places)
+(if places
     `(tagbody
-       ,@(mapcar
+        ,@(mapcar
            #`(let ((,g!a #1=,(nth (car a1) places))
                    (,g!b #2=,(nth (cadr a1) places)))
                (if (,comparator ,g!b ,g!a)
-                 (setf #1# ,g!b
-                       #2# ,g!a)))
-           (build-batcher-sn (length places))))))
-
-#+sbcl
-(progn #d{sortf (comparator &rest places)
-           (if places
-	       `(tagbody
-		   ,@(mapcar
-		      #`(let ((,g!a #1=,(nth (car a1) places))
-			      (,g!b #2=,(nth (cadr a1) places)))
-			  (if (,comparator ,g!b ,g!a)
-			      (setf #1# ,g!b
-				    #2# ,g!a)))
-		      (build-batcher-sn (length places)))))})
+                   (setf #1# ,g!b
+                         #2# ,g!a)))
+           (build-batcher-sn (length places)))))}
 
 ;;;;;; NEW CODE FOR ANTIWEB
 #+cl-ppcre
@@ -573,79 +430,56 @@
                 :end1 1)
        (ignore-errors (parse-integer (subseq (symbol-name s) 1)))))
 
-#-sbcl
-(defmacro! if-match ((match-regex str) then &optional else)
-  (let* ((dollars (remove-duplicates
-                   (remove-if-not #'dollar-symbol-p
-                                  (flatten then))))
-         (top (or (car (sort (mapcar #'dollar-symbol-p dollars) #'>))
-                  0)))
-    `(multiple-value-bind (,g!matches ,g!captures) (,match-regex ,str)
-       (declare (ignorable ,g!matches ,g!captures))
-       (let ((,g!captures-len (length ,g!captures)))
-         (declare (ignorable ,g!captures-len))
-         (symbol-macrolet ,(mapcar #`(,(symb "$" a1)
-                                       (if (< ,g!captures-len ,a1)
-                                           (error "Too few matchs: ~a unbound." ,(mkstr "$" a1))
-                                           (aref ,g!captures ,(1- a1))))
-                                   (loop for i from 1 to top collect i))
-           (if ,g!matches
-               ,then
-               ,else))))))
-#+sbcl
 (defun error-aux (a1)
   (error "Too few matchs: ~a unbound." (mkstr "$" a1)))
-#+sbcl
 #d{if-match ((match-regex str) then &optional else)
 (let* ((dollars (remove-duplicates
-		 (remove-if-not #'dollar-symbol-p
-				(flatten then))))
+                 (remove-if-not #'dollar-symbol-p
+                                (flatten then))))
        (top (or (car (sort (mapcar #'dollar-symbol-p dollars) #'>))
-		0)))
+                0)))
   `(multiple-value-bind (,g!matches ,g!captures) (,match-regex ,str)
      (declare (ignorable ,g!matches ,g!captures))
      (let ((,g!captures-len (length ,g!captures)))
        (declare (ignorable ,g!captures-len))
        (symbol-macrolet ,(mapcar (lambda (a1)
-				   `(,(symb #\$ a1)
-				      (if (< ,g!captures-len ,a1)
-					  (error-aux ,a1)
-					  (aref ,g!captures ,(1- a1)))))
-				 (loop for i from 1 to top collect i))
-	 (if ,g!matches
-	     ,then
-	     ,else)))))}
-#+(and cl-ppcre sbcl)
+                                   `(,(symb #\$ a1)
+                                      (if (< ,g!captures-len ,a1)
+                                          (error-aux ,a1)
+                                          (aref ,g!captures ,(1- a1)))))
+                                 (loop for i from 1 to top collect i))
+         (if ,g!matches
+             ,then
+             ,else)))))}
 #d{subst-mode-ppcre-lambda-form(o!args)
 ``(lambda (,',g!str)
     (cl-ppcre:regex-replace-all
      ,(car ,g!args)
      ,',g!str
      ,(cadr ,g!args)))}
-#+sbcl
 #g{dlambda (&rest ds)
 `(lambda (&rest ,g!args)
    (case (car ,g!args)
      ,@(mapcar
-	(lambda (d)
-	  `(,(if (eq t (car d))
-		 t
-		 (list (car d)))
-	     (apply (lambda ,@(cdr d))
-		    ,(if (eq t (car d))
+        (lambda (d)
+          `(,(if (eq t (car d))
+                 t
+                 (list (car d)))
+             (apply (lambda ,@(cdr d))
+                    ,(if (eq t (car d))
                          g!args
                          `(cdr ,g!args)))))
-	ds)))}
-#+(and cl-ppcre sbcl)
-(progn #d{subst-mode-ppcre-lambda-form (o!args)
-           ``(lambda (,',g!str)
-	       (cl-ppcre:regex-replace-all
-		,(car ,g!args)
-		,',g!str
-		,(cadr ,g!args)))})
+        ds)))}
+#+cl-ppcre
+#d{subst-mode-ppcre-lambda-form (o!args)
+``(lambda (,',g!str)
+    (cl-ppcre:regex-replace-all
+     ,(car ,g!args)
+     ,',g!str
+     ,(cadr ,g!args)))}
 
 (defmacro when-match ((match-regex str) &body forms)
   `(if-match (,match-regex ,str)
-	     (progn ,@forms)))
+             (progn ,@forms)))
 
 ;; EOF

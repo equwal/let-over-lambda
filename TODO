@@ -1,0 +1,2 @@
+- Fix backquote-kludge in automatic-gensyms.lisp to not remove backquotes from
+  lower level reader macros like "", #f, etc.

@@ -22,7 +22,8 @@
                #:cl-ppcre
                #:named-readtables)
   :components ((:file "package")
-	       (:file "automatic-gensyms")
+               (:file "utils")
+               (:file "automatic-gensyms")
                (:file "let-over-lambda"))
   :in-order-to ((test-op (test-op let-over-lambda-test))))
 
