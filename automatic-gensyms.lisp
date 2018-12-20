@@ -87,8 +87,6 @@
 (defun backquote-remove (str)
   "TODO: Make this work better!"
   (remove #\` str))
-(defun push-on (elt stack)
-  (vector-push-extend elt stack) stack)
 (defmacro with-macro-fn (char new-fn &body body)
   (once-only (char new-fn)
     (with-gensyms (old)
@@ -126,16 +124,17 @@
                  ,@,declarations
                  ,@,new-body))))
 (defmacro env ((syms body) stream remove)
+  "The environment required before any and all autogensymming."
   (with-gensyms (str)
-    ``((,',str ,(listify (read-to-string ,stream (read-char ,stream))))
-       (,',body (read-from-string ,',str nil))
-       (,',syms (read-atoms ,',str ',',remove)))))
+    `((,str (listify (read-to-string ,stream (read-char ,stream))))
+      (,body (read-from-string ,str nil))
+      (,syms (read-atoms ,str ',remove)))))
 (defmacro make-autogensym-reader ((&optional binds-out binds-in) form stream
                                   &optional syms (remove '(#\,)))
   "For functions that read #d, #n, and #g."
   (with-gensyms (name body in-str in-char in-numarg)
-    `(binds let* `(,(env (,syms ,body) ,stream ,remove)
-                   ,,binds-out)
+    `(binds let* `(',(env (,syms ,body) ,stream ,remove)
+                                 ,,binds-out)
        (with-declarations ,form ,name (,in-str ,in-char ,in-numarg)
          (binds let (,syms ,binds-in),@body)))))
 (defun |#d-reader| (stream char numarg)

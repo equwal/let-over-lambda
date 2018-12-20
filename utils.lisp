@@ -71,3 +71,6 @@ Bonus points: negative n does nthlist wrapping."
        `(let (,,@(loop for g in gensyms for n in names collect ``(,,g ,,n)))
           ,(let (,@(loop for n in names for g in gensyms collect `(,n ,g)))
              ,@body)))))
+(defun push-on (elt stack)
+  "Make extendable arrays just work. Use :fill-pointer and :adjustable."
+  (vector-push-extend elt stack) stack)
