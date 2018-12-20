@@ -75,7 +75,7 @@
        `(let (,,@(loop for g in gensyms for n in names collect ``(,,g ,,n)))
           ,(let (,@(loop for n in names for g in gensyms collect `(,n ,g)))
              ,@body)))))
-(defun prepare (str)
+(defun listify (str)
   (concatenate 'string (string #\() str (string #\))))
 (defun enclose (char)
   (cond ((char= char #\{) #\})
@@ -101,7 +101,7 @@
                 (prog1 (progn ,@body) (set-macro-character ,char ,old)))))))
 (defun cleanup (remove atoms)
   (remove-duplicates (mapcar #'(lambda (x)
-                                 (intern (set-difference remove (symbol-name x))))
+                                 (intern (remove remove (symbol-name x))))
                              (remove-if-not #'g!-symbol-p atoms))
                      :test #'(lambda (x y)
                                (string= (symbol-name x)
@@ -109,13 +109,14 @@
 (defun read-atoms (str remove)
   "Lisp code in a string to work around SBCL's implementation."
   (cleanup remove
-   (with-macro-fn #\, nil
-     (flatten (read-from-string (backquote-remove (prepare str)) nil nil)))))
+           (with-macro-fn #\, nil
+             (flatten (read-from-string (backquote-remove (listify str)) nil nil)))))
 (defun read-to-string (stream terminating-char
                        &optional (acc (make-array 0 :adjustable t :fill-pointer 0)))
-  (let ((ch (read-char stream nil nil)))
-    (if (and ch (not (char= terminating-char ch)))
-        (read-to-string stream terminating-char (push-on ch acc))
+  (let ((ch (read-char stream nil nil))
+        (en (enclose terminating-char)))
+    (if (and ch (not (char= en ch)))
+        (read-to-string stream en (push-on ch acc))
         (coerce acc 'string))))
 (defmacro with-declarations (form name args body)
   "Preserve docstrings and declarations in autogensyms."
@@ -126,29 +127,40 @@
                  ,(when ,docstring ,docstring)
                  ,@,declarations
                  ,@,new-body))))
-
+(defun nthflatten (n list)
+  "Reduce nested lists by n levels. Example usage: list of let bindings.
+Bonus points: negative n does nthlist."
+  (labels ((flatten-1 (list acc)
+             "Reduce a list by one level."
+             (if (null list)
+                 (nreverse acc)
+                 (flatten-1 (cdr list)
+                            (loop for b in (car list)
+                                  do (push b acc)
+                                  finally (return acc))))))
+    (cond ((< n 0) (nthflatten (1+ n) (list list)))
+          ((= 0 n) list)
+          ((> n 0) (nthflatten (1- n) (flatten-1 list nil))))))
 (defmacro binds (fn/mac binds &body body)
-  "Plural let/let*: Put bindings together. Don't eval the first."
-  `(,fn/mac (append ',(car binds) ,@binds) ,@body))
-(defmacro lets* (binds &body body)
-  `(binds let* ,binds ,@body))
-(defmacro lets (binds &body body)
-  `(binds let ,binds ,@body))
-
-(defmacro make-autogensym-reader
-    ((&optional out-binds* in-binds*) form stream &optional (remove '(#\,)))
+  "Plural let, let*, etc: Put bindings together."
+  `(,fn/mac ,(nthflatten 1 binds)
+            ,@body))
+(defmacro env ((syms) stream remove)
+  (with-gensyms (str)
+    `((,str (listify (read-to-string ,stream (read-char ,stream))))
+      (,code (read-from-string ,str nil))
+      (,syms (read-atoms ,str ',remove)))))
+(defmacro make-autogensym-reader ((&optional binds) form stream body
+                                  &optional syms (remove '(#\,)))
   "For functions that read #d, #n, and #g."
-  (with-gensyms (str code name syms body in-str in-char in-numarg)
-    `(lets* (((,str (prepare (read-to-string ,stream (enclose (read-char ,stream)))))
-              (,code (read-from-string ,str nil))
-              (,syms (read-atoms ,str ',remove))
-              (,body ',code))
-             ,binds*)
-       (with-declarations ,form (,in-str ,in-char ,in-numarg)
-         ,name (let* ,in-binds* ,body)))))
+  (with-gensyms (str name code in-str in-char in-numarg)
+    `(binds let* (,(env (str) stream remove)
+                  ,binds)
+       (with-declarations ,form ,name (,in-str ,in-char ,in-numarg)
+         (progn ,@body))))
 (defun |#d-reader| (stream char numarg)
   (declare (ignore char numarg))
-  (make-autogensym-reader ((os (remove-if-not #'o!-symbol-p (remove-duplicates atoms)))
+  (make-autogensym-reader ((os (remove-if-not #'o!-symbol-p (remove-duplicates syms)))
                            (gs (mapcar #'o!-symbol-to-g!-symbol os)))
                           defmacro
                           stream
@@ -156,10 +168,11 @@
                           (mapcar (lambda (s)
                                     `(,s (gensym (subseq (symbol-name ,s) 2))))
                                   x!-list)
+                          syms
                           '(#\, #\')))
 (defun |#n-reader| (stream char numarg)
   (declare (ignore char numarg))
-  (make-autogensym-reader () 'defun stream))
+  (make-autogensym-reader () defun stream))
 (defun |#g-reader| (stream char numarg)
   (declare (ignore char numarg))
   (make-autogensym-reader () str code syms defmacro stream))
