@@ -67,33 +67,25 @@
 
 ;;;; Define reader macros to sidestep SBCL's implementation of backquote.
 (in-package #:let-over-lambda)
-(defvar enclose
-  (make-encloses #\{ #\}
-                 #\[ #\]
-                 #\( #\)
-                 #\< #\>))
-(defun make-encloses (&rest chars)
-  (loop for p in (group chars 2)
-        collect (cons (first p) (second p))))
-(defun enclose (char)
-  (cdr (assoc char enclose)))
+(defassoc enclose
+  #\{ #\}
+  #\[ #\]
+  #\( #\)
+  #\< #\>)
 (defun listify (str)
   (concatenate 'string (string #\() str (string #\))))
-(defmacro with-gensyms (symbols &body body)
-  "Create gensyms for those symbols."
-  `(let (,@(mapcar #'(lambda (sym)
-                       `(,sym ',(gensym))) symbols))
-     ,@body))
 (defun backquote-remove (str)
-  "TODO: Make this work better!"
+  "Just stupidly remove backquotes frome the code."
   (remove #\` str))
 (defmacro with-macro-fn (char new-fn &body body)
+  "Change reader macro inside this body of code."
   (once-only (char new-fn)
     (with-gensyms (old)
       `(let ((,old (get-macro-character ,char)))
          (progn (set-macro-character ,char ,new-fn)
-                (prog1 (progn ,@body) (set-macro-character ,char ,old)))))))
-(defun cleanup (remove atoms)
+                (prog1 (progn ,@body)
+                  (set-macro-character ,char ,old)))))))
+(defun symlist/g! (remove atoms)
   (remove-duplicates (mapcar #'(lambda (x)
                                  (intern (remove remove (symbol-name x))))
                              (remove-if-not #'g!-symbol-p atoms))
@@ -102,56 +94,65 @@
                                         (symbol-name y)))))
 (defun read-atoms (str remove)
   "Lisp code in a string to work around SBCL's implementation."
-  (cleanup remove
-           (with-macro-fn #\, nil
-             (flatten (read-from-string (backquote-remove (listify str)) nil nil)))))
-(defun read-to-string (stream &optional (acc (make-array 0 :adjustable t :fill-pointer 0)))
-  "Only for delimited strings like #d{...} since it t"
-  (if (= 0 (length acc))
-      (read-char stream)
-      (let ((ch (read-char stream nil nil))
-            (en (enclose terminating-char)))
-        (if (and ch (not (char= en ch)))
-            (read-to-string stream en (push-on ch acc))
-            (coerce acc 'string)))))
+  (symlist/g! remove
+              (with-macro-fn #\, nil
+                (flatten (read-from-string (backquote-remove (listify str)) nil nil)))))
+(defun read-to-string (stream)
+  "For delimited reader macros like #d{}, ends on the next }."
+  (labels ((rec (en acc)
+             (let ((ch (read-char stream nil nil)))
+               (if (and ch (not (char= en ch)))
+                   (rec en (push-on ch acc))
+                   (coerce acc 'string)))))
+    (let ((en (read-char stream)))
+      (rec (if (enclose en) (enclose en) en)
+           (make-array 0 :adjustable t :fill-pointer 0)))))
 (defmacro with-declarations (form name args body)
-  "Preserve docstrings and declarations in autogensyms."
+  "Preserve docstrings and declarations in defmacro and defun."
   (with-gensyms (declarations new-body docstring)
     `(multiple-value-bind (,new-body ,declarations ,docstring)
-         (parse-body ',body :documentation t)
+         (parse-body ,body :documentation t)
        `(,',form ,',name ,',args
                  ,(when ,docstring ,docstring)
                  ,@,declarations
                  ,@,new-body))))
-(defmacro env ((syms body) stream remove)
-  "The environment required before any and all autogensymming."
-  (with-gensyms (str)
-    `((,str (listify (read-to-string ,stream (read-char ,stream))))
-      (,body (read-from-string ,str nil))
-      (,syms (read-atoms ,str ',remove)))))
-(defmacro make-autogensym-reader ((&optional binds-out binds-in) form stream
-                                  &optional syms (remove '(#\,)))
-  "For functions that read #d, #n, and #g."
-  (with-gensyms (name body in-str in-char in-numarg)
-    `(binds let* `(',(env (,syms ,body) ,stream ,remove)
-                                 ,,binds-out)
-       (with-declarations ,form ,name (,in-str ,in-char ,in-numarg)
-         (binds let (,syms ,binds-in),@body)))))
+(defun defmacro!-reader (stream)
+  (let* ((str (read-to-string stream))
+         (code (read-from-string str))
+         (syms (read-atoms str '(#\,)))
+         (os (remove-if-not #'o!-symbol-p syms))
+         (gs (mapcar #'o!-symbol-to-g!-symbol os)))
+    (let ((body (cddr code)))
+      `(with-declarations defmacro ,(car code) ,(cadr code)
+         (body declarations docstring)
+         (let ,(mapcar
+                (lambda (s)
+                  `(,s (gensym ,(subseq
+                                 (symbol-name s)
+                                 2))))
+                syms)
+           `(let ,(mapcar #'list (list ,@gs) (list ,@os))
+              ,,@body))))))
+(defun make-autogensym-reader (form stream)
+  (let* ((str (read-to-string stream))
+         (code (read-from-string str))
+         (syms (read-atoms str '(#\,))))
+    (let ((body (cddr code)))
+      `(with-declarations ,form ,(car code) ,(cadr code)
+         (body declarations docstring)
+         (let ,(mapcar
+                (lambda (s)
+                  `(,s (gensym ,(subseq
+                                 (symbol-name s)
+                                 2))))
+                syms)
+           ,@body)))))
 (defun |#d-reader| (stream char numarg)
   (declare (ignore char numarg))
-  (make-autogensym-reader (rest ((os (remove-if-not #'o!-symbol-p (remove-duplicates syms)))
-                                 (gs (mapcar #'o!-symbol-to-g!-symbol os)))
-                                (mapcar #'list gs os))
-                          defmacro
-                          stream
-                          (mapcar (lambda (s)
-                                    `(,s (gensym (subseq (symbol-name ,s) 2))))
-                                  x!-list)
-                          syms
-                          '(#\, #\')))
+  (defmacro!-reader stream))
 (defun |#n-reader| (stream char numarg)
   (declare (ignore char numarg))
-  (make-autogensym-reader () defun stream))
+  (make-autogensym-reader 'defun stream))
 (defun |#g-reader| (stream char numarg)
   (declare (ignore char numarg))
-  (make-autogensym-reader () defmacro stream))
+  (make-autogensym-reader 'defmacro stream))

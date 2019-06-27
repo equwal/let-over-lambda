@@ -1,5 +1,10 @@
 (in-package #:let-over-lambda)
 
+(defmacro defassoc (name &rest list)
+  "Syntatic sugar around defining a constant alist with accessor functions."
+  `(defun ,name (left)
+     (cdr (assoc left (loop for p in ',(group list 2)
+                            collect (cons (first p) (second p)))))))
 (defun g!-symbol-p (s)
   (and (symbolp s)
        (> (length (symbol-name s)) 2)
@@ -74,3 +79,8 @@ Bonus points: negative n does nthlist wrapping."
 (defun push-on (elt stack)
   "Make extendable arrays just work. Use :fill-pointer and :adjustable."
   (vector-push-extend elt stack) stack)
+(defmacro with-gensyms (symbols &body body)
+  "Create gensyms for those symbols."
+  `(let (,@(mapcar #'(lambda (sym)
+                       `(,sym ',(gensym))) symbols))
+     ,@body))
